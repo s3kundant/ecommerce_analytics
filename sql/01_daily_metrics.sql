@@ -1,5 +1,4 @@
 WITH daily_metrics AS (
-    -- ШАГ 1: Агрегация на уровне календарного дня
     SELECT 
         DATE(created_at) AS order_date,
         COUNT(DISTINCT user_id) AS dau,
@@ -10,7 +9,6 @@ WITH daily_metrics AS (
     GROUP BY DATE(created_at)
 ),
 calculated_metrics AS (
-    -- ШАГ 2: Расчет AOV и оконные функции
     SELECT 
         order_date,
         dau,
@@ -21,7 +19,6 @@ calculated_metrics AS (
         ROUND(AVG(daily_revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2) AS revenue_7d_moving_avg
     FROM daily_metrics
 )
--- ШАГ 3: Финальный расчет прироста
 SELECT 
     order_date,
     dau,
