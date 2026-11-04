@@ -1,10 +1,9 @@
-WITH filtered_orders AS (
+WITH all_delivered_orders AS (
     SELECT DISTINCT
         user_id,
         DATE_TRUNC('month', created_at)::date AS order_month
     FROM orders
     WHERE order_status = 'delivered'
-      AND created_at >= '2017-01-01'
       AND created_at < '2018-09-01'
 ),
 user_cohorts AS (
@@ -12,13 +11,19 @@ user_cohorts AS (
         user_id,
         order_month,
         MIN(order_month) OVER (PARTITION BY user_id) AS cohort_month
-    FROM filtered_orders
+    FROM all_delivered_orders
+),
+filtered_cohorts AS (
+    SELECT *
+    FROM user_cohorts
+    WHERE cohort_month >= '2017-01-01'
+      AND cohort_month < '2018-08-01'
 ),
 cohort_sizes AS (
     SELECT
         cohort_month,
         COUNT(DISTINCT user_id) AS cohort_size
-    FROM user_cohorts
+    FROM filtered_cohorts
     GROUP BY 1
 ),
 retention_raw AS (
@@ -49,7 +54,7 @@ retention_raw AS (
             WHEN (EXTRACT(YEAR FROM c.order_month) - EXTRACT(YEAR FROM c.cohort_month)) * 12 +
                  (EXTRACT(MONTH FROM c.order_month) - EXTRACT(MONTH FROM c.cohort_month)) = 6 
             THEN c.user_id END) AS m6_users
-    FROM user_cohorts c
+    FROM filtered_cohorts c
     JOIN cohort_sizes cs ON c.cohort_month = cs.cohort_month
     GROUP BY 1, 2
 )
