@@ -1,231 +1,138 @@
-from pathlib import Path
-import numpy as np
+import os
+import sys
 import pandas as pd
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-import os
+import csv
+from io import StringIO
 
+print(">>> [1/5] Загрузка скрипта и переменных окружения...")
 load_dotenv()
 
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "ecommerce_analytics")
-
-if DB_PASSWORD:
-    db_uri = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-else:
-    db_uri = f"postgresql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-
-engine = create_engine(db_uri)
-
-DATA_DIR = Path("./data")  
-
-auth_str = f"{DB_USER}:{DB_PASSWORD}" if DB_PASSWORD else DB_USER
-DATABASE_URL = f"postgresql+psycopg2://{auth_str}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(DATABASE_URL)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+SQL_DIR = os.path.join(BASE_DIR, "sql")
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
-def run_etl():
-    print(" [1/5] Чтение сырых CSV-файлов Olist...")
-    customers_df = pd.read_csv(DATA_DIR / "olist_customers_dataset.csv")
-    orders_df = pd.read_csv(DATA_DIR / "olist_orders_dataset.csv")
-    items_df = pd.read_csv(DATA_DIR / "olist_order_items_dataset.csv")
-    products_df = pd.read_csv(DATA_DIR / "olist_products_dataset.csv")
+def get_engine():
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD", "")
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    db = os.getenv("DB_NAME", "ecommerce_analytics")
+    url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
+    print(f">>> [2/5] Подключение к PostgreSQL: {host}:{port}/{db} (пользователь: {user})...")
+    return create_engine(url)
 
-    
-    print(" [2/5] Обработка уникальных пользователей (users)...")
-    
-    users_clean = customers_df.drop_duplicates(
-        subset=["customer_unique_id"]
-    ).copy()
 
-    users_to_load = pd.DataFrame()
-    users_to_load["external_user_id"] = users_clean["customer_unique_id"]
-    users_to_load["email"] = None  
-    users_to_load["country_code"] = "BR"  
-    users_to_load["city"] = users_clean["customer_city"].str.title()
-
-    np.random.seed(42)
-    channels = ["organic", "paid_search", "social_media", "referral", "email"]
-    users_to_load["acquisition_channel"] = np.random.choice(
-        channels, size=len(users_to_load), p=[0.40, 0.25, 0.20, 0.10, 0.05]
-    )
-
-    cust_orders = orders_df.merge(
-        customers_df[["customer_id", "customer_unique_id"]],
-        on="customer_id",
-        how="inner",
-    )
-    first_order_dates = (
-        cust_orders.groupby("customer_unique_id")["order_purchase_timestamp"]
-        .min()
-        .reset_index()
-    )
-    users_to_load = users_to_load.merge(
-        first_order_dates,
-        left_on="external_user_id",
-        right_on="customer_unique_id",
-        how="left",
-    )
-    users_to_load["created_at"] = pd.to_datetime(
-        users_to_load["order_purchase_timestamp"]
-    )
-    users_to_load["is_active"] = True
-    users_to_load = users_to_load.drop(
-        columns=["customer_unique_id", "order_purchase_timestamp"]
-    )
-
+def init_schema(engine):
+    schema_path = os.path.join(SQL_DIR, "00_init_schema.sql")
+    print(f">>> [3/5] Применение схемы из {schema_path}...")
+    if not os.path.exists(schema_path):
+        print(f"ОШИБКА: Файл {schema_path} не найден!")
+        sys.exit(1)
+    with open(schema_path, "r", encoding="utf-8") as f:
+        sql_commands = f.read()
     with engine.begin() as conn:
-        conn.execute(
-            text("TRUNCATE TABLE order_items, orders, users RESTART IDENTITY;")
-        )
+        conn.execute(text(sql_commands))
+    print(">>> Схема успешно создана в базе данных.")
 
-    print(
-        f" Загрузка {len(users_to_load)} пользователей в БД..."
-    )
-    users_to_load.to_sql(
-        "users", engine, if_exists="append", index=False, method="multi", chunksize=5000
-    )
+def psql_insert_copy(table, conn, keys, data_iter):
+    """Сверхбыстрая вставка через COPY вместо построчного INSERT"""
+    dbapi_conn = conn.connection
+    with dbapi_conn.cursor() as cur:
+        s_buf = StringIO()
+        writer = csv.writer(s_buf)
+        writer.writerows(data_iter)
+        s_buf.seek(0)
+        columns = ', '.join([f'"{k}"' for k in keys])
+        table_name = f'"{table.name}"'
+        cur.copy_expert(f"COPY {table_name} ({columns}) FROM STDIN WITH CSV", s_buf)
 
-    db_users = pd.read_sql(
-        "SELECT user_id, external_user_id FROM users", engine
-    )
+def load_raw_data(engine):
+    print(">>> [4/5] Чтение сырых CSV-файлов из data/...")
+    cust_path = os.path.join(DATA_DIR, "olist_customers_dataset.csv")
+    ord_path = os.path.join(DATA_DIR, "olist_orders_dataset.csv")
+    items_path = os.path.join(DATA_DIR, "olist_order_items_dataset.csv")
 
+    customers = pd.read_csv(cust_path)
+    orders = pd.read_csv(ord_path)
+    items = pd.read_csv(items_path)
 
-    print(" [3/5] Сборка и очистка заказов (orders)...")
-    items_df["line_total"] = items_df["price"] + items_df["freight_value"]
-    order_totals = (
-        items_df.groupby("order_id")["line_total"].sum().reset_index()
-    )
+    orders["order_purchase_timestamp"] = pd.to_datetime(orders["order_purchase_timestamp"])
 
-    orders_merged = orders_df.merge(
-        customers_df[["customer_id", "customer_unique_id"]],
+    orders_with_uni = orders.merge(
+        customers[["customer_id", "customer_unique_id", "customer_city", "customer_state"]],
         on="customer_id",
         how="inner",
     )
-    orders_merged = orders_merged.merge(
-        db_users,
-        left_on="customer_unique_id",
-        right_on="external_user_id",
-        how="inner",
-    )
-    orders_merged = orders_merged.merge(order_totals, on="order_id", how="left")
 
-    status_map = {
-        "delivered": "delivered",
-        "shipped": "shipped",
-        "canceled": "canceled",
-        "unavailable": "canceled",
-        "invoiced": "paid",
-        "processing": "paid",
-        "approved": "paid",
-        "created": "created",
-    }
-
-    orders_merged["status"] = (
-        orders_merged["order_status"].map(status_map).fillna("created")
-    )
-    orders_merged["total_amount"] = (
-        orders_merged["line_total"].fillna(0.00).round(2)
-    )
-    orders_merged["discount_amount"] = 0.00
-    orders_merged["promo_code"] = None
-    orders_merged["created_at"] = pd.to_datetime(
-        orders_merged["order_purchase_timestamp"]
-    )
-    orders_merged["paid_at"] = pd.to_datetime(orders_merged["order_approved_at"])
-    orders_merged["delivered_at"] = pd.to_datetime(
-        orders_merged["order_delivered_customer_date"]
+    items_agg = (
+        items.groupby("order_id", as_index=False)
+        .agg(items_gmv=("price", "sum"), freight_value=("freight_value", "sum"))
     )
 
+    orders_full = orders_with_uni.merge(items_agg, on="order_id", how="inner")
 
-    orders_merged = orders_merged.sort_values("created_at").reset_index(
-        drop=True
-    )
-    orders_merged["db_order_id"] = orders_merged.index + 1
-
-    orders_to_load = orders_merged[
-        [
-            "user_id",
-            "status",
-            "total_amount",
-            "discount_amount",
-            "promo_code",
-            "created_at",
-            "paid_at",
-            "delivered_at",
-        ]
-    ]
-
-    print(f" Загрузка {len(orders_to_load)} заказов в БД...")
-    orders_to_load.to_sql(
-        "orders", engine, if_exists="append", index=False, method="multi", chunksize=5000
-    )
-
-
-    order_id_map = orders_merged[["order_id", "db_order_id"]].rename(
-        columns={"order_id": "external_order_id", "db_order_id": "order_id"}
-    )
-
-
-    print(" [4/5] Агрегация товарных позиций (order_items)...")
-    items_with_cat = items_df.merge(
-        products_df[["product_id", "product_category_name"]],
-        on="product_id",
-        how="left",
-    )
-
-    unique_products = items_with_cat["product_id"].unique()
-    product_id_map = {
-        ext_id: idx + 1 for idx, ext_id in enumerate(unique_products)
-    }
-    items_with_cat["db_product_id"] = items_with_cat["product_id"].map(
-        product_id_map
-    )
-
-    items_merged = items_with_cat.merge(
-        order_id_map,
-        left_on="order_id",
-        right_on="external_order_id",
-        how="inner",
-    )
-
-
-    items_grouped = (
-        items_merged.groupby(["order_id_y", "db_product_id"], as_index=False)
+    users_df = (
+        orders_full.sort_values("order_purchase_timestamp")
+        .groupby("customer_unique_id", as_index=False)
         .agg(
-            category_name=("product_category_name", "first"),
-            quantity=("order_item_id", "count"),
-            unit_price=("price", "mean"),
+            customer_city=("customer_city", "first"),
+            customer_state=("customer_state", "first"),
+            first_order_date=("order_purchase_timestamp", "min"),
         )
-        .rename(
-            columns={"order_id_y": "order_id", "db_product_id": "product_id"}
-        )
+        .rename(columns={"customer_unique_id": "user_id"})
     )
 
-    items_grouped["category_name"] = items_grouped["category_name"].fillna(
-        "uncategorized"
-    )
-    items_grouped["unit_price"] = items_grouped["unit_price"].round(2)
-
-    print(
-        f" Загрузка {len(items_grouped)} позиций чека в БД..."
-    )
-    items_grouped.to_sql(
-        "order_items",
-        engine,
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=5000,
+    orders_db = orders_full[
+        ["order_id", "customer_unique_id", "order_status", "order_purchase_timestamp", "items_gmv", "freight_value"]
+    ].rename(
+        columns={
+            "customer_unique_id": "user_id",
+            "order_purchase_timestamp": "created_at",
+        }
     )
 
-    print(
-        " [5/5] ETL успешно завершен! Все данные загружены в PostgreSQL."
-    )
+    valid_order_ids = set(orders_db["order_id"])
+    items_db = items[items["order_id"].isin(valid_order_ids)][
+        ["order_id", "product_id", "price", "freight_value"]
+    ].copy()
+
+    print(">>> Быстрая заливка users в PostgreSQL...")
+    users_df.to_sql("users", engine, if_exists="append", index=False, method=psql_insert_copy)
+    print(">>> Быстрая заливка orders в PostgreSQL...")
+    orders_db.to_sql("orders", engine, if_exists="append", index=False, method=psql_insert_copy)
+    print(">>> Быстрая заливка order_items в PostgreSQL...")
+    items_db.to_sql("order_items", engine, if_exists="append", index=False, method=psql_insert_copy)
+    print(">>> Все таблицы успешно заполнены за несколько секунд.")
 
 
-if __name__ == "__main__":
-    run_etl()
+def export_sql_marts(engine):
+    print(">>> [5/5] Выполнение SQL-запросов и экспорт витрин в reports/...")
+    sql_files = {
+        "01_daily_metrics.sql": "daily_metrics.csv",
+        "02_monthly_metrics.sql": "monthly_metrics.csv",
+        "03_cohort_retention.sql": "cohort_retention.csv",
+    }
+    for sql_file, csv_name in sql_files.items():
+        path = os.path.join(SQL_DIR, sql_file)
+        if not os.path.exists(path):
+            print(f"ОШИБКА: SQL-файл {path} не найден!")
+            continue
+        print(f"    - Обработка {sql_file} -> {csv_name}...")
+        with open(path, "r", encoding="utf-8") as f:
+            query = f.read()
+        df = pd.read_sql(query, engine)
+        df.to_csv(os.path.join(REPORTS_DIR, csv_name), index=False)
+
+
+
+print(">>> Старт выполнения программы...")
+eng = get_engine()
+init_schema(eng)
+load_raw_data(eng)
+export_sql_marts(eng)
+print(">>> ГОТОВО: База данных обновлена, SQL-витрины выгружены в reports/!")

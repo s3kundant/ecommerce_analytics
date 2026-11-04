@@ -1,31 +1,34 @@
-WITH daily_metrics AS (
-    SELECT 
-        DATE(created_at) AS order_date,
-        COUNT(DISTINCT user_id) AS dau,
-        COUNT(order_id) AS daily_orders,
-        SUM(CASE WHEN status != 'canceled' THEN 1 ELSE 0 END) AS paid_orders,
-        SUM(CASE WHEN status != 'canceled' THEN total_amount ELSE 0 END) AS daily_revenue
-    FROM orders
-    GROUP BY DATE(created_at)
+WITH calendar AS (
+    SELECT generate_series(
+        '2017-01-01'::date,
+        '2018-08-31'::date,
+        '1 day'::interval
+    )::date AS report_date
 ),
-calculated_metrics AS (
-    SELECT 
-        order_date,
-        dau,
-        daily_orders,
-        daily_revenue,
-        ROUND(daily_revenue / NULLIF(paid_orders, 0), 2) AS daily_aov,
-        LAG(dau, 1) OVER (ORDER BY order_date) AS prev_day_dau,
-        ROUND(AVG(daily_revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 2) AS revenue_7d_moving_avg
-    FROM daily_metrics
+daily_agg AS (
+    SELECT
+        created_at::date AS report_date,
+        COUNT(DISTINCT user_id) AS daily_buyers,
+        COUNT(DISTINCT order_id) AS delivered_orders,
+        SUM(items_gmv) AS daily_gmv,
+        SUM(items_gmv + freight_value) AS daily_gmv_with_freight
+    FROM orders
+    WHERE order_status = 'delivered'
+      AND created_at >= '2017-01-01'
+      AND created_at < '2018-09-01'
+    GROUP BY 1
 )
-SELECT 
-    order_date,
-    dau,
-    daily_orders,
-    daily_revenue,
-    daily_aov,
-    revenue_7d_moving_avg,
-    ROUND(((dau - prev_day_dau)::NUMERIC / NULLIF(prev_day_dau, 0)) * 100, 2) AS dau_dod_growth_pct
-FROM calculated_metrics
-ORDER BY dau DESC;
+SELECT
+    c.report_date,
+    COALESCE(d.daily_buyers, 0) AS daily_buyers,
+    COALESCE(d.delivered_orders, 0) AS delivered_orders,
+    COALESCE(d.daily_gmv, 0.00) AS daily_gmv,
+    COALESCE(d.daily_gmv_with_freight, 0.00) AS daily_gmv_with_freight,
+    ROUND(COALESCE(d.daily_gmv / NULLIF(d.delivered_orders, 0), 0), 2) AS aov,
+    ROUND(AVG(COALESCE(d.daily_gmv, 0)) OVER (
+        ORDER BY c.report_date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ), 2) AS rolling_7d_gmv
+FROM calendar c
+LEFT JOIN daily_agg d ON c.report_date = d.report_date
+ORDER BY c.report_date;

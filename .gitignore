@@ -4,3 +4,4 @@ __pycache__/
 .env
 venv/
 data/
+reports/rfm_users_detailed.csv
