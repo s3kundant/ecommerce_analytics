@@ -30,5 +30,10 @@ SELECT
     rolling_mau_30d,
     ROUND((dau::NUMERIC / NULLIF(rolling_mau_30d, 0)) * 100, 2) AS stickiness_ratio_pct
 FROM dau_mau_calculated
+<<<<<<< HEAD
 WHERE activity_date >= '2017-01-01' 
 ORDER BY activity_date DESC;
+=======
+WHERE activity_date >= '2017-01-01'  
+ORDER BY activity_date DESC;
+>>>>>>> ac64861 (docs: finalize project1 documentation and scripts)

@@ -1,5 +1,8 @@
 WITH user_orders AS (
+<<<<<<< HEAD
     SELECT 
+=======
+>>>>>>> ac64861 (docs: finalize project1 documentation and scripts)
         user_id,
         DATE_TRUNC('month', created_at)::DATE AS order_month,
         MIN(DATE_TRUNC('month', created_at)::DATE) OVER (PARTITION BY user_id) AS cohort_month
